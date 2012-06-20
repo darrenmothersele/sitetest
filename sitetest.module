@@ -1,0 +1,134 @@
+<?php
+/**
+ * @file
+ * Code for the sitetest feature.
+ */
+
+include_once 'sitetest.features.inc';
+
+
+/**
+ * Implements hook_cron().
+ * Load all site nodes and add to testing queue
+ */
+function sitetest_cron() {
+
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'node');
+  $query->entityCondition('bundle', 'site');
+  $query->propertyCondition('status', 1);
+  $query->addMetaData('account', user_load(1));
+  $result = $query->execute();
+  
+  $sites = array();
+  if (!empty($result['node'])) {
+	  $site_nids = array_keys($result['node']);
+	  $sites = entity_load('node', $site_nids);
+  }
+  $queue = DrupalQueue::get('pingcheck');
+  foreach ($sites as $site) {
+	  $urls = field_get_items('node', $site, 'field_site_link');
+	  if (!empty($urls)) {
+		  $pingcheck = array(
+		  	'nid' => $site->nid,
+		    'url' => $urls[0]['url'],
+		  );
+   	  $queue->createItem($pingcheck);
+    }
+  }
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function sitetest_cron_queue_info() {
+  $queues['pingcheck'] = array(
+    'worker callback' => 'pingcheck_perform_url_check',
+    'time' => 60,
+  );
+  return $queues;
+}
+
+function sitetest_perform_url_check($site) {
+	$site_node = node_load($site['nid']);
+	$result = drupal_http_request($site['url']);
+	$field_collection_item = entity_create('field_collection_item', array('field_name' => 'field_site_results'));
+	$field_collection_item->setHostEntity('node', $site_node);
+	$field_collection_item->field_check_date[LANGUAGE_NONE][]['value'] = REQUEST_TIME;
+	if (!empty($result->code)) {
+  	$field_collection_item->field_check_code[LANGUAGE_NONE][]['value'] = $result->code;
+    if ($result->code != 200) {
+	    $account = user_load($site_node->uid);
+	    $params['account'] = $account;
+	    $params['node'] = $site_node;
+	    $params['result'] = $result;
+	    drupal_mail('pingcheck', 'site_error', $account->mail, user_preferred_language($account), $params);
+    }
+  } else {
+    $account = user_load($site_node->uid);
+    $result->code = 'unknown';
+    $params['account'] = $account;
+    $params['node'] = $site_node;
+    $params['result'] = $result;
+    drupal_mail('pingcheck', 'site_error', $account->mail, user_preferred_language($account), $params);
+  }
+	if (!empty($result->protocol)) {
+	  $field_collection_item->field_check_protocol[LANGUAGE_NONE][]['value'] = $result->protocol;
+  }
+	if (!empty($result->status)) {
+	  $field_collection_item->field_check_status[LANGUAGE_NONE][]['value'] = $result->status;
+  }
+	if (!empty($result->redirect_code)) {
+	  $field_collection_item->field_check_redirect_code[LANGUAGE_NONE][]['value'] = $result->redirect_code;
+  }
+  if (!empty($result->redirect_url)) {
+	  $field_collection_item->field_check_redirect_url[LANGUAGE_NONE][]['value'] = $result->redirect_url;
+  }
+  if (!empty($result->error)) {
+	  $field_collection_item->field_check_error[LANGUAGE_NONE][]['value'] = $result->error;
+	}
+  $field_collection_item->save();
+}
+
+/**
+ * Implements hook_mail().
+ */
+function sitetest_mail($key, &$message, $params) {
+	$account = $params['account'];
+	$node = $params['node'];
+	$result = $params['result'];
+	$variables = array(
+		'%site_name' => $node->title,
+		'%username' => format_username($account),
+		'%node_url' => url('node/' . $node->nid, array('absolute' => TRUE)),
+		'%code' => $result->code,
+		'%date' => format_date(REQUEST_TIME),
+		'%error' => $result->error,
+	);
+	if ($key == 'site_error') {
+		$subject = '[PingCheck] error with %site_name';
+		$body = <<<EOD
+Dear %username, \n
+\n
+There was an error (%code) when checking %site_name at %date.\n
+%error
+\n
+Regards,\n
+\n
+The PingCheck Team\n
+EOD;
+	  $subject = strtr($subject, $variables);
+	  $body = strtr($body, $variables);
+	  $message['subject'] .= str_replace(array("\r", "\n"), '', $subject);
+	  $message['body'][] = drupal_html_to_text($body);
+	}
+}
+
+
+
+
+
+
+
+
+
